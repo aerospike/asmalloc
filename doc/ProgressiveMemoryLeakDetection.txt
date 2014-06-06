@@ -1,0 +1,278 @@
+Safe and Efficient Progressive Resource Leak Detection:         ***PSI***  29-Aug-2013
+-------------------------------------------------------
+(For multi-threaded, Linux/C applications.)
+
+0). Overview:
+       - In general, the question of whether a program leaks memory is
+           undecidable.  (It can be reduced to the halting problem.)
+
+       - In practice, however, it is both possible as well as extremely
+           useful to be able to give even an approximate answer to the
+           question, and specifically to point to a likely location
+           where such a leak may be occurring for further investigation
+           by the developers.
+
+       - A program-agnostic, tools-based approach will be the most
+           useful way to (approximately) answer this question.  (Note
+           that the details of the implementation are dependent upon the
+           current Linux operating environment using the C language,
+           GLibC, PThreads, and the GCC tool chain.)
+
+       - Given these considerations, the approach proposed below is
+           a Safe, Efficient, Progressive Resource Leak Detector that
+           provides Positive and Negative Evidence for Resource Leaks.
+
+1). Safe:
+       - Thread-local memory accounting ==> No additional locking on
+           most allocations / deallocations.
+
+       - Tunable significant event detection (requires locking to
+           periodically propagate local info. globally.) 
+
+2). Efficient:
+       - (Essentially) Constant space requirement.
+
+       - [Small overhead on allocated blocks, perhaps absorbed by
+           reality of over-allocation ("malloc_usable_size()".)] 
+
+       - Light-weight in terms of both memory and CPU overhead.
+
+       - Collection runs "on-line."
+
+       - Detection can be enabled / disabled at any point.
+
+       - Level of detection overhead tunable as a trade-off vs.
+           latency / size of (supposed) detection.
+
+3). Progressive Resource Leak Detection:
+       - "Progressive" means leak keeps occurring in a long-lived process
+           (e.g., servers.)
+
+       - Method generally not applicable to bounded number of "one-time"
+           leaks, except by incurring potentially intrusive impact on
+           program efficiency / "correct" behavior by using a low
+           significance threshold, which also implies the likelihood
+           frequent of "false positive" reports (albeit offset by just
+           as numerous "never mind"s.)
+
+       - Prime example:  GLibC dynamically-allocated memory leak detection.
+
+       - Same ideas could be applied to FDs (FILE, socket, (named)
+           pipe), threads (+ TLS/stack size), etc.
+
+4). Positive / Negative Evidence for Leaks:
+       - When a significant (according to the significance threshold for
+           that resource) quantity of resource allocation changes
+           (positive = allocation, negative = deallocation) occurs, if
+           alerting is enabled (CB not NULL), then the thread detecting
+           a significant event will invoke the significance callback function.
+
+       - For memory, the thresholds are on delta #bytes allocated and
+           delta #allocations.  Other resources would only have the second.
+
+       - Thus, each detecting thread needs to keep track of the current
+           and last-reported resource usage to compute the delta.
+
+       - The significance callback function will take a global lock protecting
+           the global resource accounting data structure.  <== Implies
+           single-threaded, blocking the allocating / deallocating
+           thread.  (Alternative:  MsgQ w/ separate reporting thread.)
+
+       - The CB will aggregate the significant event report into the
+           global resource account.
+
+       - If the incoming report triggers a significant rise or fall in
+           resource usage according to the appropriate threshold(s) [same
+           threshold(s) as used by the detector??], then the appropriate
+           message will be logged.
+
+       - If the delta is > 0, the log message will be that a possible
+           leak has been detected.
+
+       - If the delta is < 0, the log message will be a "never mind"
+           (i.e., that the previous report may have been a false positive.
+
+       - In the case that a true progressive resource leak exists, it
+           will eventually be detected by this method.
+
+       - In the case that the presumed "leak" is actually legitimate
+           (i.e., intended) a high-resource usage condition, a positive
+           report will eventually be followed by a corresponding
+           negative report.  Thus, determining what's actually to be
+           considered a leak is to be evaluated by the user.
+
+       - In particular, if the significant event threshold(s) are low,
+           numerous false positives followed by "never mind"s would be
+           expected.  Thus, tuning the threshold(s) to sufficiently high
+           values to only report high-likelihood resource leaks is
+           required to use this detection scheme effectively.
+
+5). Implementation:
+       - Use wrapper functions (or macros) for resource allocation /
+           deallocation.
+
+       - Use static program analysis to determine and construct a table
+           of all locations where resources are allocated / deallocated
+           via the wrapper functions.
+
+       - Each program location is represented as a unique, small integer,
+           corresponding to a function, file name, and line number within
+           file. (Used as a compact, direct index into the allocation array.)
+
+       - For human-readable logging, the program location table is
+           automatically generated as a source file to be compiled into
+           the program.
+
+       - Hook system library functions:
+           - Resource allocation / deallocation functions.
+           - Thread creation / destruction.
+
+       - Each thread is represented as a unique, small integer.
+          (Used instead of thread ID for compaction and direct use as an
+          index into array of thread ID x program location.)
+
+       - Upon thread creation, create in TLS the following variables:
+           - Thread ID.
+           - Array indexed by location of accounting info., initialized
+              to 0, and containing:
+              - Net #allocations.
+              - Net #bytes allocated (in the case of memory.)
+              - Last reported net #allocations.
+              - Last reported #bytes allocated (in the case of memory.)
+
+       - Upon thread termination, all resource accounts must be summed into
+           the global accounts.  (This prevents positive / negative leaks
+           from being missed through the creation of numerous short-lived
+           threads.)
+
+       - Upon resource allocation, increase allocation size by N bytes to store:
+           - ID of allocating thread.
+           - Allocating program location.
+           - [Optional] Flag bits to differentiate the actual library
+               function used for the allocation.
+           - [Optional] Size of allocation.  (Only for determining
+               allocation overhead, which should generally be minimal if
+               the heap allocator is any good.)
+
+       - Threshold set / get config. parameter for each type of resource.
+
+       - Command to enable / disable resource leak detection by setting
+           the significance callback function variable to the actual
+           function or NULL.
+
+       - Upon receipt of the significance callback, grab the lock,
+           update the global account, and log if threshold crossed.
+
+       Initialization and Control:
+
+       - Application looks up the command function and the hook
+           function via "dlsym()".
+
+       - The command function is used to:
+           1). Register a logging function used to output messages via
+                the application's logging system.
+           2). Pass command requests to the resource accounting system,
+                e.g., have all threads send there accounting info. up to
+                the center upon the next resource allocation-related
+                function call.
+           3). What else??
+
+        - The hook can be called periodically to allow the library to do
+            work:
+            1). Log the current state of resource accounting.
+            2). Perhaps request threads to send up their local
+                 accounting data globally.
+            3). What else??
+
+6). Comparison with Other Approaches:
+       - GLibC memory tracing / heap checking functions:
+            Not multi-thread safe!
+            Only useful on toy problems.
+            No ability to filter allocation stream for only specific
+            allocations, leading to data overload (in an external log
+            file (could on be a RAM disk.))
+
+       - Original Aerospike "alloc.[ch]" Memory Accounting:
+            Uses 2 hash tables for "precise" memory accounting
+            (Ptr==>Loc & Loc==>AllocInfo.)
+            Has the ability to query allocations database by time,
+            space, net and total counts, and change.
+            Has multi-thread issues that can become prohibitive at large
+            scale.
+            Has relatively high run-time and memory overhead costs.
+            Can be enabled / disabled at run time with a loss of
+            precision (and some apparent multi-thread hazard risk of crash.)
+            Apparent multi-thread issues, likely due to allocating and
+            freeing on different threads, perhaps in reverse order(!),
+            which are mitigated by running "non-strict", which ignores
+            unexpected frees (due to either double frees or out-of-order
+            detection.)
+            Never started up on server daemon with 99GB namespace.
+
+       - "Light-Weight" Aerospike Memory Accounting:
+            Similar, simpler, earlier version of this approach that
+            simply wraps the allocation / deallocation functions and
+            provides thread-safe, light-weight net memory allocation
+            statistics, but there is no way to determine who allocated
+            what, where, and when.
+            Ran with no discernible performance degradation on 150GB+
+            process size server daemon with 99GB namespace.
+
+       - Valgrind:
+            Precise resource usage tracking, but extremely high memory
+            and performance overhead that is totally unusable in any
+            non-toy clustered server environment.
+
+7). Implementation Fine Points:
+       - The resource accounting feature is enabled using the
+            "LD_PRELOAD" mechanism to load the resource accounting
+            shared library which hooks the relevant GLibC functions.
+
+       - The application may look up the command and hook functions in
+            the library to communicate with the resource.  (Not
+            required, but generally necessary to be useful.)
+
+       - In GLibC, "vfprintf()" in "stdio-common/vfprintf.c" calls "free
+            (args_malloced)" where "args_malloced" = 0 frequently, and
+            thus all "free(0)" calls are not counted.
+
+       - In GLibC, "_dlerror_run()" in "dlfcn/dlerror.c" calls
+            "calloc (1, sizeof (*result))", where the total request size
+            is 32 when using PThreads (i.e., including "pthread.h".)
+            Since this happens before the memory accounting functions
+            are registered, there is a special case in the accounting
+            version of "calloc()" that allocates any pre-init. requests
+            from a statically-allocated (1KB) buffer.  Note that if any
+            other such allocation occurs, the buffer size may need to be
+            increased.  Also note that if such a request were ever to be
+            freed, it would fail.  In this case, it's used to allocate a
+            thread specific "key", which is never freed.
+
+       - To hook "pthread_create()", a wrapper start routine and an
+            associated data type representing the thread to be created
+            (thread ID, start routine, and argument) are used.  The
+            wrapper start routine sets values of the thread-specific
+            keys (ID, resource accounting table location) and
+            initializes the resource accounting table.
+
+       - Upon thread termination, the thread-specific "my_key"
+            destructor will be called, which will send up the thread's
+            final resource accounting info. globally.
+
+       - Since "pthread_self()" values are re-used, the resource
+            accounting system uses its own thread IDs.  (Could also use
+            the result of "gettid" system call.)
+
+       - To prevent GCC from using builtins for "strdup()" and
+            "strndup()" (which happens whenever optimization is enabled
+            (-O1 and greater)), the following construct is used:
+
+                  retval = (*(&(function)))(args...);
+
+            Otherwise, the functions themselves will not be called in all
+            cases that they are present in the source code (depending
+            upon the special cases handled as builtins by the compiler.)
+            For resource accounting, it would generally be better not to
+            have these requests be optimized, unless there is a need to
+            account for the actions taken by the results of the builtin
+            transformations.
