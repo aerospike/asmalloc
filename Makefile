@@ -44,11 +44,11 @@ SOURCES = $(LIB_SOURCES) $(PGM_SOURCES)
 
 OBJECTS = $(LIB_OBJECTS) $(PGM_OBJECTS)
 
-# For GCC v4.4.5 use DWARF version 2, othewise use version 4:
-ifeq ($(shell gcc -dumpversion), 4.4.5)
-  DWARF_VERSION=2
-else
+# If GCC v4.4.7 or later, use DWARF version 4, othewise use version 2:
+ifeq ($(shell bin/VersionCheck.py 'gcc -dumpversion' 4.4.7), 1)
   DWARF_VERSION=4
+else
+  DWARF_VERSION=2
 endif
 
 CFLAGS = -gdwarf-$(DWARF_VERSION) -g3 -Wall -std=gnu99 -fPIC -I$(INCDIR)
