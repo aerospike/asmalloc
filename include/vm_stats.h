@@ -67,7 +67,7 @@ typedef struct vm_stats_s {
 } vm_stats_t;
 
 /*
- *  Symbolic key names for the VM-related statistics, corresponding to the position in the "vm_stats_off[]" array.
+ *  Symbolic key names for the VM-related statistics, corresponding to the position in the "vm_stats_desc[]" array.
  */
 typedef enum vm_stats_key_e {
 	VM_PEAK,

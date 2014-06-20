@@ -26,7 +26,6 @@
 
 #pragma once
 
-#include <stdarg.h>
 #include <stdint.h>
 #include <time.h>
 #include <unistd.h>
