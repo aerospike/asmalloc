@@ -1,7 +1,7 @@
 /*
  * src/asmalloc.c
  *
- * Copyright (C) 2013-2014 Aerospike, Inc.
+ * Copyright (C) 2013-2016 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -116,7 +116,7 @@ static uint64_t g_features = DEFAULT_FEATURES;
  *
  *  ***WARNING:  Bad things will happen if this number is exceeded by the program!!***
  */
-#define MAX_TLS_MALLOCATIONS (1024)
+#define MAX_TLS_MALLOCATIONS (1152)
 
 /*
  *  Default minimum size of blocks triggering mallocation alerts.
@@ -331,6 +331,8 @@ static void *(*original_sbrk)(intptr_t increment);
 static void *(*original___default_morecore)(ptrdiff_t __size);
 
 #ifdef FOR_JEMALLOC
+static void *(*original_mallocx)(size_t size, int flags);
+static void *(*original_rallocx)(void *ptr, size_t size, int flags);
 static void (*original_malloc_stats_print)(void (*write_cb)(void *, const char *), void *je_cbopaque, const char *opts);
 #else
 static void *(*original_mmap)(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
@@ -390,6 +392,15 @@ cf_atomic64 mem_count_brks = 0;
 cf_atomic64 mem_count_sbrks = 0;
 cf_atomic64 mem_count_morecores = 0;
 
+#ifdef FOR_JEMALLOC
+cf_atomic64 mem_count_mallocxs = 0;
+cf_atomic64 mem_count_rallocxs = 0;
+
+cf_atomic64 mem_count_mallocx_total = 0;
+cf_atomic64 mem_count_rallocx_plus_total = 0;
+cf_atomic64 mem_count_rallocx_minus_total = 0;
+#endif
+
 cf_atomic64 mem_count_net_mmaps = 0;
 cf_atomic64 mem_count_mmaps = 0;
 cf_atomic64 mem_count_mmap64s = 0;
@@ -438,6 +449,15 @@ static void init_counters(void)
 	cf_atomic64_set(&mem_count_brks, 0);
 	cf_atomic64_set(&mem_count_sbrks, 0);
 	cf_atomic64_set(&mem_count_morecores, 0);
+
+#ifdef FOR_JEMALLOC
+	cf_atomic64_set(&mem_count_mallocxs, 0);
+	cf_atomic64_set(&mem_count_rallocxs, 0);
+
+	cf_atomic64_set(&mem_count_mallocx_total, 0);
+	cf_atomic64_set(&mem_count_rallocx_plus_total, 0);
+	cf_atomic64_set(&mem_count_rallocx_minus_total, 0);
+#endif
 
 	cf_atomic64_set(&mem_count_net_mmaps, 0);
 	cf_atomic64_set(&mem_count_mmaps, 0);
@@ -586,6 +606,11 @@ static void asm_mem_count_stats()
 	size_t mcsn = cf_atomic64_get(mem_count_strndups);
 	size_t mcv = cf_atomic64_get(mem_count_vallocs);
 
+#ifdef FOR_JEMALLOC
+	size_t mcmx = cf_atomic64_get(mem_count_mallocxs);
+	size_t mcrx = cf_atomic64_get(mem_count_rallocxs);
+#endif
+
 	fprintf(stderr, "mem_count: %ld (%.3f %s)\n", mc, quantity, scale);
 	fprintf(stderr, "=============================================\n");
 	fprintf(stderr, "net mallocs: %ld\n", (mcm + mcc + mcv + mcs + mcsn - mcf));
@@ -598,6 +623,11 @@ static void asm_mem_count_stats()
 	fprintf(stderr, "mem_count_strndups: %ld (%ld)\n", mcsn, cf_atomic64_get(mem_count_strndup_total));
 	fprintf(stderr, "mem_count_vallocs: %ld (%ld)\n", mcv, cf_atomic64_get(mem_count_valloc_total));
 	fprintf(stderr, "=============================================\n");
+#ifdef FOR_JEMALLOC
+	fprintf(stderr, "mem_count_mallocxs: %ld (%ld)\n", mcmx, cf_atomic64_get(mem_count_mallocx_total));
+	fprintf(stderr, "mem_count_rallocxs: %ld (%ld / %ld)\n", mcrx, cf_atomic64_get(mem_count_rallocx_plus_total), cf_atomic64_get(mem_count_rallocx_minus_total));
+	fprintf(stderr, "=============================================\n");
+#endif
 
 	quantity = 0.0;
 	scale = "B";
@@ -802,6 +832,14 @@ static bool init(int i)
 		/********************************/
 
 #ifdef FOR_JEMALLOC
+		if (!(original_mallocx = dlsym(RTLD_NEXT, "mallocx"))) {
+			dfprintf(stderr, "Could not find \"mallocx\"!\n");
+		}
+
+		if (!(original_rallocx = dlsym(RTLD_NEXT, "rallocx"))) {
+			dfprintf(stderr, "Could not find \"rallocx\"!\n");
+		}
+
 		if (!(original_malloc_stats_print = dlsym(RTLD_NEXT, "malloc_stats_print"))) {
 			dfprintf(stderr, "Could not find \"malloc_stats_print\"!\n");
 		}
@@ -1301,9 +1339,106 @@ void *__default_morecore(ptrdiff_t __size)
 	return retval;
 }
 
-/******************************** MMAP ********************************/
+#ifdef FOR_JEMALLOC
 
-#ifndef FOR_JEMALLOC
+/******************************** JEMALLOC NON-STANDARD API ******************************/
+
+/*
+ *  ASM version of mallocx(3).
+ *  (Treat essentially like malloc(3).)
+ */
+void *mallocx(size_t size, int flags)
+{
+	INIT(12);
+
+	SET_ALLOC_INFO();
+
+	// Reserve space for the allocation location.
+	size += sizeof(int);
+
+	void *retval = original_mallocx(size, flags);
+
+	size_t actual_size = malloc_usable_size(retval);
+	cf_atomic64_add(&mem_count, actual_size);
+	cf_atomic64_add(&mem_count_malloc_total, actual_size);
+	cf_atomic64_add(&mem_count_mallocx_total, actual_size);
+
+	cf_atomic64_incr(&mem_count_mallocs);
+	cf_atomic64_incr(&mem_count_mallocxs);
+	dfprintf(stderr, ">>>In asm mallocx()<<<\n");
+
+	SET_LOC_LOC(retval, size);
+
+	MAYBE_DO_CB();
+
+	return retval;
+}
+
+/*
+ *  ASM version of rallocx(3).
+ *  (Treat essentially like realloc(3).)
+ */
+void *rallocx(void *ptr, size_t size, int flags)
+{
+	INIT(13);
+
+	cf_atomic64_incr(&mem_count_reallocs);
+	cf_atomic64_incr(&mem_count_rallocxs);
+	dfprintf(stderr, ">>>In asm reallocx()<<<\n");
+
+	int64_t orig_size = (ptr ? malloc_usable_size(ptr) : 0);
+	int64_t	delta = 0;
+
+	// Reserve space for the allocation location.
+	if (size) {
+		size += sizeof(int);
+	}
+
+	void *retval = original_rallocx(ptr, size, flags);
+
+	if (!size) {
+		delta = - orig_size;
+	} else {
+		// [Note:  If rallocx() fails, NULL is returned and the original block is left unchanged.]
+		if (retval) {
+			delta = malloc_usable_size(retval) - orig_size;
+		}
+	}
+	SET_MALLOCATION_INFO((!size ? FREE : ALLOC), ptr);
+
+	cf_atomic64_add(&mem_count, delta);
+	if (delta > 0) {
+		cf_atomic64_add(&mem_count_realloc_plus_total, delta);
+		cf_atomic64_add(&mem_count_rallocx_plus_total, delta);
+	} else {
+		cf_atomic64_add(&mem_count_realloc_minus_total, delta);
+		cf_atomic64_add(&mem_count_rallocx_minus_total, delta);
+	}
+
+	if (!ptr) {
+		cf_atomic64_incr(&mem_count_mallocs);
+	} else if (!size) {
+		cf_atomic64_incr(&mem_count_frees);
+	} else {
+		cf_atomic64_incr(&mem_count_frees);
+		cf_atomic64_incr(&mem_count_mallocs);
+	}
+
+	// Only set the allocation location for non-free()-type rallocx()'s.
+	if (size) {
+		size_t actual_size = malloc_usable_size(retval);
+		SET_LOC_LOC(retval, size);
+	}
+
+	MAYBE_DO_CB();
+
+	return retval;
+}
+
+#else
+
+/****************************************** MMAP *****************************************/
+
 /*
  *  ASM version of mmap(2).
  */
@@ -1362,14 +1497,14 @@ int munmap(void *addr, size_t length)
 }
 #endif
 
-/******************************** Sys V IPC - SHM ********************************/
+/************************************ Sys V IPC - SHM ************************************/
 
 /*
  *  ASM version of shmat(2).
  */
 void *shmat(int shmid, const void *shmaddr, int shmflg)
 {
-	INIT(14);
+	INIT(15);
 
 	cf_atomic64_incr(&mem_count_shmats);
 	dfprintf(stderr, ">>>In asm shmat()<<<\n");
@@ -1386,7 +1521,7 @@ void *shmat(int shmid, const void *shmaddr, int shmflg)
  */
 int shmctl(int shmid, int cmd, struct shmid_ds *buf)
 {
-	INIT(15);
+	INIT(16);
 
 	cf_atomic64_incr(&mem_count_shmctls);
 	dfprintf(stderr, ">>>In asm shmctl()<<<\n");
@@ -1403,7 +1538,7 @@ int shmctl(int shmid, int cmd, struct shmid_ds *buf)
  */
 int shmdt(const void *shmaddr)
 {
-	INIT(16);
+	INIT(17);
 
 	cf_atomic64_incr(&mem_count_shmdts);
 	dfprintf(stderr, ">>>In asm shmdt()<<<\n");
@@ -1420,7 +1555,7 @@ int shmdt(const void *shmaddr)
  */
 int shmget(key_t key, size_t size, int shmflg)
 {
-	INIT(17);
+	INIT(18);
 
 	cf_atomic64_incr(&mem_count_shmgets);
 	cf_atomic64_add(&mem_count_net_shm, size);
