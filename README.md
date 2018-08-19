@@ -97,7 +97,7 @@ The ASMalloc API, declared in the file **include/asmalloc.h**, is as follows:
 The following commands are available to be sent via **as_cmd()**:
 
     ASM_CMD_SET_FEATURES   -- Set the bit vector of ASMalloc features.
-    ASM_CMD_SET_THRESHOLDS -- The the triplet of callback-triggering thresholds.
+    ASM_CMD_SET_THRESHOLDS -- The triplet of callback-triggering thresholds.
     ASM_CMD_SET_CALLBACK   -- Set the user's callback.
     ASM_CMD_PRINT_STATS    -- Print memory statistics.
 
@@ -120,7 +120,7 @@ the bitwise OR operator ("|") and sent as the argument to the
 Please see the **src/test-asmalloc.c** program for an example of how to
 integrate an application with ASMalloc.
 
-Note that the the file **include/test-mallocations.h** is sample database of
+Note that the file **include/test-mallocations.h** is a sample database of
 (fictitious) memory allocation function call locations in the
 application.  This file defines types and a statically-initialized table
 giving the info. about each memory allocation-related function call in
